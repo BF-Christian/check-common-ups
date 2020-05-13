@@ -1,3 +1,4 @@
+root@icinga:/etc/icinga2/conf.d# cat /usr/lib/nagios/plugins/check_common_ups 
 #!/bin/bash
 # this file: /usr/lib64/nagios/plugins/check_common_ups
 # Mel - 2016-09-15 - icinga2 check apc ups
@@ -24,6 +25,7 @@
 # Mel - 2017-04-28 - Fix calibration/diagnostic days result in perfdata when 
 #                    they have not been run
 # Mel - 2017-05-10 - Typo: unsuppoted
+# BF-Christian - 2020-05-13 - Adds sensors for CyberPower and fixes option -T issue
 # !!!!!!!!!!!!!!!!!!!!!!!!!!! REQUIRES BASH 4 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 # THE PROGRAM IS DISTRIBUTED IN THE HOPE THAT IT WILL BE USEFUL, BUT WITHOUT 
 # ANY WARRANTY. IT IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER
@@ -104,6 +106,19 @@ Options:
      is more than INTEGER degrees Celsius or fahrenheit is set by -d. 
      Crit values not greater than warn values will be set to warn value +1.
      If not set, defaults to 50 celsius, or 122 fahrenheit. (see -d)
+  -e INTEGER, --warnenvtemp INTEGER, Set WARNING status if env temperature
+     is more than INTEGER degrees. Celsius or fahrenheit is set by -d.
+     If not set, defaults to 28 celsius, or 83 fahrenheit (see -d)
+  -E INTEGER, --critenvtemp INTEGER, Set CRITICAL status if env temperature
+     is more than INTEGER degrees Celsius or fahrenheit is set by -d. 
+     Crit values not greater than warn values will be set to warn value +1.
+     If not set, defaults to 33 celsius, or 92 fahrenheit. (see -d)
+  -s INTEGER, --warnhumid INTEGER, Set WARNING status if humidity
+     is more than INTEGER percent.
+     If not set, defaults to 50 percent.
+  -S INTEGER, --crithumid INTEGER, Set CRITICAL status if humidity
+     is more than INTEGER percent. 
+     If not set, defaults to 65 percent.
   -v, --voltcrit Set CRITICAL for input voltage low or high results. (-i
      and -I)
   -V --version Show version information.
@@ -165,7 +180,10 @@ diagcrit=20
 # calibration days
 calibwarn=365
 calibcrit=400
-while getopts "bBC:d:hH:i:I:l:L:r:R:t:T-:u:vVw:W:xXy:Y:zZ" opt; do
+# humidity
+humidwarn=50
+humidcrit=65
+while getopts "bBC:d:hH:i:I:l:L:r:R:t:T:u:vVw:W:xXy:Y:zZ:e:E:s:S" opt; do
     case $opt in
         b)  onbatt="CRIT" ;;
         B)  ckreplc="no" ;;
@@ -190,7 +208,11 @@ while getopts "bBC:d:hH:i:I:l:L:r:R:t:T-:u:vVw:W:xXy:Y:zZ" opt; do
         X)  calibtest="no";calibdata="no" ;;
         y)  calibwarn=$OPTARG ;;
         Y)  calibcrit=$OPTARG ;;
-        z)  diagdata="no" ;;
+        e)  envtempwarn=$OPTARG ;;
+        E)  envtempcrit=$OPTARG ;;
+        s)  humidwarn=$OPTARG ;;
+        S)  humidcrit=$OPTARG ;;
+	z)  diagdata="no" ;;
         Z)  calibdata="no" ;;
         -)
             # long args for official compatibility...
@@ -199,6 +221,10 @@ while getopts "bBC:d:hH:i:I:l:L:r:R:t:T-:u:vVw:W:xXy:Y:zZ" opt; do
                 version)    showver;exit ;;
                 community)  community="${!OPTIND}";shift $OPTIND;OPTIND=1;;
                 degrees)    degrees="${OPTARG:0:1}" ;;
+                critenvtemp)   envtempcrit=${!OPTIND};shift $OPTIND;OPTIND=1;;
+                warnenvtemp)   envtempwarn=${!OPTIND};shift $OPTIND;OPTIND=1;;
+                crithumid)   humidcrit=${!OPTIND};shift $OPTIND;OPTIND=1;;
+                warnhumid)   humidwarn=${!OPTIND};shift $OPTIND;OPTIND=1;;
                 crittemp)   tempcrit=${!OPTIND};shift $OPTIND;OPTIND=1;;
                 warntemp)   tempwarn=${!OPTIND};shift $OPTIND;OPTIND=1;;
                 critrun)    runcrit=${!OPTIND};shift $OPTIND;OPTIND=1;;
@@ -241,6 +267,8 @@ case ${upsvendorID} in
     *)       upstype="unsupported";upsvendorPrettyName="Unsupported";;
 esac
 
+upstype="cyber";upsvendorPrettyName="CyberPower";
+
 case ${upstype} in
     cyber)
         MIBmodel="1.3.6.1.4.1.3808.1.1.1.1.1.1.0"
@@ -254,6 +282,8 @@ case ${upstype} in
         MIBdiagResult="1.3.6.1.4.1.3808.1.1.1.7.2.3.0"
         MIBlastDiag="1.3.6.1.4.1.3808.1.1.1.7.2.4.0"
         MIBcalibDate="1.3.6.1.4.1.3808.1.1.1.7.2.8.0"
+	MIBenvTemp="1.3.6.1.4.1.3808.1.1.4.2.6.0"
+	MIBenvHum="1.3.6.1.4.1.3808.1.1.4.3.1.0"
         ;;
     apc)
         MIBmodel="1.3.6.1.4.1.318.1.1.1.1.1.1.0"
@@ -281,9 +311,13 @@ degrees="${degrees,,}"
 if [[ $degrees == "f" ]];then
     [[ -z $tempwarn ]] && tempwarn=113
     [[ -z $tempcrit ]] && tempcrit=122
+    [[ -z $envtempwarn ]] && envtempwarn=83
+    [[ -z $envtempcrit ]] && envtempcrit=92
 else
     [[ -z $tempwarn ]] && tempwarn=45
     [[ -z $tempcrit ]] && tempcrit=50
+    [[ -z $envtempwarn ]] && envtempwarn=28
+    [[ -z $envtempcrit ]] && envtempcrit=33
 fi
 [[ $tempwarn -gt $tempcrit ]] && tempcrit=$((10#${tempwarn}+1))
 # run time
@@ -448,9 +482,55 @@ if [[ $temp -gt $tempwarn ]];then
     fi
 fi
 
+if [[ $upstype == "cyber" ]];then
+	snmpPoll "$MIBenvTemp" EnvironmentTemperature
+	envtempcresult="${snmpresult##* }"
+	if [[ $envtempcresult != "NULL" ]];then
+		envtempc="$(echo "$envtempcresult/10"|bc)"
+		envtempf="$(echo "(9*$envtempc/5)+32"|bc)"
+		if [[ $degrees == "c" ]];then
+		    envtemp=$envtempc
+		    envtemppref="${envtempc}c"
+		    envtempalt="${envtempf}f"
+		else
+		    envtemp=$envtempf
+		    envtemppref="${envtempf}f"
+		    envtempalt="${envtempc}c"
+		fi
+		if [[ $envtemp -gt $envtempwarn ]];then
+		    if [[ $envtemp -gt $envtempcrit ]];then
+		        exitstatus=2
+		       [[ -z $exitstring ]] && exitstring="CRIT: envtemp $envtemppref($envtempalt) > $envtempcrit$degrees" || exitstring="$exitstring, CRIT: envtemp $envtemppref($envtempalt) > $envtempcrit$degrees"
+		    else
+		        [[ $exitstatus -lt 1 ]] && exitstatus=1
+		        [[ -z $exitstring ]] && exitstring="WARN: envtemp $envtemppref($envtempalt) > $envtempwarn$degrees" || exitstring="$exitstring, WARN: envtemp $envtemppref($envtempalt) > $envtempwarn$degrees"
+		    fi
+		fi
+	fi
+fi
+
+if [[ $upstype == "cyber" ]];then
+	snmpPoll "$MIBenvHum" EnvironmentHumidity
+	envhumid="${snmpresult##* }"
+	if [[ $envhumid != "NULL" ]];then
+		if [[ $envhumid -gt $humidwarn ]];then
+		    if [[ $envhumid -gt $humidcrit ]];then
+		        exitstatus=2
+		       [[ -z $exitstring ]] && exitstring="CRIT: humid $envhumid > $humidcrit" || exitstring="$exitstring, CRIT: humid $envhumid > $humidcrit""
+		    else
+		        [[ $exitstatus -lt 1 ]] && exitstatus=1
+		       [[ -z $exitstring ]] && exitstring="WARN: humid $envhumid > $humidwarn" || exitstring="$exitstring, WARN: humid $envhumid > $humidwarn""
+		    fi
+		fi
+	fi
+fi
+
 perfdata=";| Temp=$temp;$tempwarn;$tempcrit;0 Line_Voltage=$involtsdata;$inhigh;;$inlow Load=$load;$loadwarn;$loadcrit;0 RunTime=$runtime;$runwarn;$runcrit;0"
+
 [[ $diagdata == "no" ]] || perfdata="$perfdata Diagnostic=${diagdays:-0};$diagwarn;$diagcrit;0"
 [[ $calibdata == "no" ]] || perfdata="$perfdata Calibration=${calibdays:-0};$calibwarn;$calibcrit;0"
+[[ $envtempcresult == "NULL" || $upstype != "cyber" ]] || perfdata="$perfdata EnvironmentTemperature=$envtemp;$envtempwarn;$envtempcrit;0"
+[[ $envtempcresult == "NULL" ]] || perfdata="$perfdata EnvironmentHumidity=$envhumid;$humidwarn;$humidcrit;0"
 [[ -z $exitstring ]] && exitstring="OK"
 exitstring="host: $upshostname: $upsvendorPrettyName ${upsmodel:-(Unknown Model)}: $exitstring$perfdata"
 case $exitstatus in
